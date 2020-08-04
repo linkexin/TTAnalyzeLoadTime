@@ -21,7 +21,9 @@
 
 @implementation TTLoadTime
 
-#pragma mark -- C++ method list template
+
+#pragma mark - C++ method list template
+
 template <typename Element, typename List, uint32_t FlagMask>
 struct entsize_list_tt {
     uint32_t entsizeAndFlags;
@@ -155,17 +157,16 @@ struct method_t {
 struct method_list_t : entsize_list_tt<method_t, method_list_t, 0x3> {
 };
 
-#pragma mark -- runtime typedef
-typedef struct classref * classref_t;
-//typedef struct mach_header_64 headerType;
 
+#pragma mark - Runtime Typedef
+
+typedef struct classref * classref_t;
 
 #ifndef __LP64__
-typedef struct mach_header headerType;
+typedef struct mach_header machHeaderType;
 #else
-typedef struct mach_header_64 headerType;
+typedef struct mach_header_64 machHeaderType;
 #endif
-
 
 struct category_t {
     const char *name;
@@ -183,17 +184,18 @@ struct category_t {
 };
 
 #define GETSECT(name, type, sectname)                                   \
-type *name(const headerType *mhdr, size_t *outCount) {              \
-return getDataSection<type>(mhdr, sectname, nil, outCount);     \
-}                                                                   \
+    type *name(const machHeaderType *mhdr, size_t *outCount) {              \
+        return getDataSection<type>(mhdr, sectname, nil, outCount);     \
+    }                                                                   \
 
+// __objc_nlclslist: Objective-C 的 +load 函数列表
+// __objc_nlcatlist: Objective-C 的 categories 的 +load 函数列表
 GETSECT(_getObjc2NonlazyClassList,    classref_t,      "__objc_nlclslist");
 GETSECT(_getObjc2NonlazyCategoryList, category_t *,    "__objc_nlcatlist");
 
 template <typename T>
-T* getDataSection(const headerType *mhdr, const char *sectname, size_t *outBytes, size_t *outCount) {
+T* getDataSection(const machHeaderType *mhdr, const char *sectname, size_t *outBytes, size_t *outCount) {
     unsigned long byteCount = 0;
-    
     
     T* data = (T*)getsectiondata(mhdr, "__DATA", sectname, &byteCount);
     if (!data) {
@@ -202,144 +204,105 @@ T* getDataSection(const headerType *mhdr, const char *sectname, size_t *outBytes
     if (!data) {
         data = (T*)getsectiondata(mhdr, "__DATA_DIRTY", sectname, &byteCount);
     }
-    
-//#ifndef __LP64__
-//    
-//    
-//#else
-//    const struct mach_header_64 *mhp64 = (const struct mach_header_64 *)mhdr;
-//
-//    
-//    T* data = (T*)getsectiondata(mhp64, "__DATA", sectname, &byteCount);
-//    if (!data) {
-//        data = (T*)getsectiondata(mhp64, "__DATA_CONST", sectname, &byteCount);
-//    }
-//    if (!data) {
-//        data = (T*)getsectiondata(mhp64, "__DATA_DIRTY", sectname, &byteCount);
-//    }
-//    
-//#endif
-
-    
     if (outBytes) *outBytes = byteCount;
     if (outCount) *outCount = byteCount / sizeof(T);
     return data;
 }
 
-#pragma mark -- static var define
 
-//static NSMutableDictionary<NSString*, NSNumber *> *g_loadcosts;
+#pragma mark - Static Var Define
+
 static NSMutableArray<NSString*> *g_loadcosts;
 
 static NSMutableDictionary *loadMS;//To record the name of category
 static NSMutableDictionary *loadCS;//To void repeat analysis same class
 
 extern "C"{
-    category_t **nlcategarylist;
-    size_t categaryCount;
+    category_t **categoryLoadList;
+    size_t categoryLoadCount;
 }
-
-#define LoadRulerBegin \
-NSLog(@">>>> before");\
-CFTimeInterval begin = CACurrentMediaTime();
-
-#define LoadRulerEnd \
-CFTimeInterval end = CACurrentMediaTime();\
-if(!g_loadcosts){\
-g_loadcosts = [[NSMutableArray alloc]initWithCapacity:10];\
-}\
-[g_loadcosts addObject:[NSString stringWithFormat:@"%@ - %@ms",NSStringFromClass([self class]), @(1000 * (end - begin))]];\
-NSLog(@"<<<< after");a
 
 //  a IMP that returns a value
 typedef id (* _IMP) (id, SEL, ...);
 // no return value
 typedef void (* _VIMP) (id, SEL, ...);
 
-#pragma mark -- static func define
-const struct mach_header *get_target_image_header() {
-    
+
+#pragma mark - Static Func Define
+
+const struct mach_header *get_mach_header() {
     const uint32_t imageCount = _dyld_image_count();
-    const struct mach_header* target_image_header = 0;
+    const struct mach_header *mach_header = 0;
     
-    for(uint32_t iImg = 0; iImg < imageCount; iImg++) {
+    for (uint32_t iImg = 0; iImg < imageCount; iImg++) {
         const char *image_name = _dyld_get_image_name(iImg);
         const char *target_image_name = ((NSString *)[[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleExecutableKey]).UTF8String;
-    
+        // 过滤掉系统的 image，找到和应用匹配的 image
         if (strstr(image_name, target_image_name) != NULL) {
-            target_image_header = _dyld_get_image_header(iImg);
+            mach_header = _dyld_get_image_header(iImg);
             break;
         }
-        
-        printf("image_name = %s\n" , image_name);
     }
     
-    return target_image_header;
+    return mach_header;
 }
 
-#pragma mark -- lazy list
-category_t **get_non_lazy_categary_list(size_t *count) {
+
+#pragma mark - lazy list
+
+category_t **get_non_lazy_category_list(size_t *count) {
     category_t **nlcatlist = NULL;
-    nlcatlist = _getObjc2NonlazyCategoryList((headerType *)get_target_image_header(), count);
+    // 将 mach header 传入，并从 mach-O 文件的 __DATA 段的特定 Section 中获得 categories 的 +load 函数列表
+    nlcatlist = _getObjc2NonlazyCategoryList((machHeaderType *)get_mach_header(), count);
     return nlcatlist;
 }
 
 classref_t *get_non_lazy_class_list(size_t *count) {
     classref_t *nlclslist = NULL;
-    nlclslist = _getObjc2NonlazyClassList((headerType *)get_target_image_header(), count);
+    // 获取 class 的 +load 函数列表
+    nlclslist = _getObjc2NonlazyClassList((machHeaderType *)get_mach_header(), count);
     return nlclslist;
 }
 
-#pragma mark -- swizze Load
-void swizzeLoadMethodInClass(Class cls)
-{
-    SEL originalSelector = NSSelectorFromString(@"load");
 
-    Method originalMethod = class_getClassMethod(cls, originalSelector);
+#pragma mark - Swizze Load
 
-    _VIMP viewDidLoad_IMP = (_VIMP)method_getImplementation(originalMethod);
-
-    method_setImplementation(originalMethod, imp_implementationWithBlock(^(id target, SEL action) {
-
-        NSLog(@"%@ did load",target);
-        viewDidLoad_IMP(target,action);
-    }));
-}
-
-void swizzeLoadMethodInClasss(Class cls, BOOL isCategary){
+void swizzeLoadMethodInClasss(Class cls, BOOL isCategary) {
     unsigned int methodCount = 0;
-    Method * methods = class_copyMethodList(cls, &methodCount);
-    NSUInteger currentLoadIndex = 0;
+    // 获取类的方法列表
+    Method *methods = class_copyMethodList(cls, &methodCount);
     for(unsigned int methodIndex = 0; methodIndex < methodCount; ++methodIndex){
         Method method = methods[methodIndex];
         objc_method_description *des = method_getDescription(method);
         std::string methodName(sel_getName(method_getName(method)));
-        if(methodName == "load"){
-            ++currentLoadIndex;
+        if (methodName == "load") {
             _VIMP load_IMP = (_VIMP)method_getImplementation(method);
+            // hook 的核心方法
             method_setImplementation(method, imp_implementationWithBlock(^(id target, SEL action) {
-                LoadRulerBegin
-                load_IMP(target,action);
+                CFTimeInterval begin = CACurrentMediaTime();
+                // 调用原方法
+                load_IMP(target, action);
                 
                 CFTimeInterval end = CACurrentMediaTime();
-                if(!g_loadcosts){
+                if (!g_loadcosts) {
                     g_loadcosts = [[NSMutableArray alloc] initWithCapacity:10];
                 }
-                
+                // 将耗时记录到全局的数组中
                 NSString *name = [loadMS valueForKey:[NSString stringWithFormat:@"%p",load_IMP]];
                 if (name && name.length > 0) {
-                }else{
+                    // 如果能从 loadMS 中获取到 name，说明是之前存好的 category 的 name
+                } else {
+                    // 如果取不到，就说明是 class 的 load 方法，直接取 class 的名字即可
                     name = NSStringFromClass(cls);
                 }
                 [g_loadcosts addObject:[NSString stringWithFormat:@"%@ - %@ms",name, @(1000 * (end - begin))]];
             }));
+            // 这里不能 break，如果这个类的 category 和 class 都有 load 方法，需要都找出来，所以要完整遍历方法列表
         }
     }
-    NSLog(@"%@",@(currentLoadIndex));
 }
 
-IMP _category_getLoadMethod(category_t *cat)
-{
+IMP _category_getLoadMethod(category_t *cat) {
     const method_list_t *mlist;
     mlist = cat->classMethods;
     if (mlist) {
@@ -352,93 +315,101 @@ IMP _category_getLoadMethod(category_t *cat)
     }
     return nil;
 }
-#pragma mark -- printLoadCosts
-void printLoadCostsInfo(){
-    NSLog(@">> all load cost info below :");
-    NSLog(@"\n");
-    
-    NSArray *testArr = [g_loadcosts sortedArrayUsingSelector:@selector(compare:)];
-    
-    for(NSString *costInfo in testArr){
-        NSLog(@"%@",costInfo);
-    }
-    NSLog(@"\n");
+
+
+#pragma mark - +Load
+
++ (void)load {
+    // 数据结构初始化
+    initializer();
+    // 获取所有 category 的 load 函数列表及数目
+    categoryLoadList = get_non_lazy_category_list(&categoryLoadCount);
+    // 将 category load 的 IMP 及 category 的名字存到全局字典中，后续输出结果时使用
+    packageCategoryLoadNameIMPPair();
+    // 替换 category 的 load 方法
+    swizzeLoadMethodInCategory();
+    // 替换 class 的 load 方法
+    swizzeLoadMethodInClass();
 }
 
 
+#pragma mark - Helper
 
-
-#pragma mark -- load
-+(void)load{
-    CFTimeInterval begin = CACurrentMediaTime();
-    NSLog(@"############### count up the costs of load func  ###############");
-    if(!loadMS){
-        loadMS = [[NSMutableDictionary alloc]init];
-    }else{
+void initializer() {
+    if (!loadMS) {
+        loadMS = [[NSMutableDictionary alloc] init];
+    } else {
         [loadMS removeAllObjects];
     }
     
-    if(!loadCS){
-        loadCS = [[NSMutableDictionary alloc]init];
-    }else{
+    if (!loadCS) {
+        loadCS = [[NSMutableDictionary alloc] init];
+    } else {
         [loadCS removeAllObjects];
     }
+}
 
-    nlcategarylist = get_non_lazy_categary_list(&categaryCount);
-    
-    for (int i = 0; i < categaryCount; i++) {
-        Class cls = (Class)CFBridgingRelease(nlcategarylist[i]->cls);
-        cls = object_getClass(cls);
-        NSString *name = [NSString stringWithCString:nlcategarylist[i]->name encoding:NSUTF8StringEncoding];
-        category_t *cat = nlcategarylist[i];
+void packageCategoryLoadNameIMPPair() {
+    // 这个循环是将 category load 的 IMP 及 category 名字存到 loadMS 中,
+    // 做这一步的原因是
+    for (int i = 0; i < categoryLoadCount; i++) {
+        Class cls = (Class)CFBridgingRelease(categoryLoadList[i]->cls);
+        cls = object_getClass(cls); // 注意注意注意，这里要取元类对象，因为 load 是类方法，后续需要到类对象的方法列表中找 +load 方法
+        NSString *name = [NSString stringWithCString:categoryLoadList[i]->name encoding:NSUTF8StringEncoding];
+        category_t *cat = categoryLoadList[i];
         _VIMP load_IMP = (_VIMP)_category_getLoadMethod(cat);
-        [loadMS addEntriesFromDictionary:@{[NSString stringWithFormat:@"%p",load_IMP]:[NSString stringWithFormat:@"%@(%@)",cls,name]}];
+        [loadMS addEntriesFromDictionary:@{[NSString stringWithFormat:@"%p", load_IMP]: [NSString stringWithFormat:@"%@(%@)", cls, name]}];
     }
-    
-    
-    for (int i = 0; i < categaryCount; i++) {
-        Class cls = (Class)CFBridgingRelease(nlcategarylist[i]->cls);
-        cls = object_getClass(cls);
-        
-        
-        if(![[loadCS allKeys] containsObject:[NSString stringWithFormat:@"%@",cls]])
-        {
+}
+
+void swizzeLoadMethodInCategory() {
+    for (int i = 0; i < categoryLoadCount; i++) {
+        Class cls = (Class)CFBridgingRelease(categoryLoadList[i]->cls);
+        cls = object_getClass(cls); // 取元类对象的原因同上
+        if (![[loadCS allKeys] containsObject:[NSString stringWithFormat:@"%@", cls]]) {
             swizzeLoadMethodInClasss(cls, YES);
         }
-        
-        [loadCS addEntriesFromDictionary:@{[NSString stringWithFormat:@"%@",cls]:cls}];
+        [loadCS addEntriesFromDictionary:@{[NSString stringWithFormat:@"%@",cls]: cls}];
     }
-    
+}
 
-    //Implicitly Link Objective-C Runtime Support
+void swizzeLoadMethodInClass() {
+    size_t classLoadCount = 0;
+    // 获取所有 class 的 load 函数列表及数目
+    classref_t *classLoadlist = get_non_lazy_class_list(&classLoadCount);
     
-    size_t count = 0;
-    classref_t *nlclslist = get_non_lazy_class_list(&count);
-// ios deployment target 8.0有一个问题 '__ARCLite__'这个Class有点特殊，这个类也实现了load
-//最后一位指向的结构体中isa变量指向0x00000000的指针，故排除
+    // ios deployment target 8.0有一个问题 '__ARCLite__'这个Class有点特殊，这个类也实现了load
+    //最后一位指向的结构体中isa变量指向0x00000000的指针，故排除
 #if __IPHONE_OS_VERSION_MIN_REQUIRED >= 90000
 #else
     count--;
 #endif
 
-    for (int i = 0; i < count; i++) {
-        classref_t nlcls = nlclslist[i];
+    for (int i = 0; i < classLoadCount; i++) {
+        classref_t nlcls = classLoadlist[i];
         Class cls = (__bridge Class)nlcls;
         if ([@"__ARCLite__" isEqualToString:NSStringFromClass(cls)]) {
             continue;
         }
-        cls = (Class)CFBridgingRelease(nlclslist[i]);
-        cls = object_getClass(cls);
-        NSLog(@"classref_t:%@",cls);
+        cls = (Class)CFBridgingRelease(classLoadlist[i]);
+        cls = object_getClass(cls); // 取元类对象
             
-        if(![[loadCS allKeys] containsObject:[NSString stringWithFormat:@"%@",cls]])
-        {
+        if(![[loadCS allKeys] containsObject:NSStringFromClass(cls)]) {
             swizzeLoadMethodInClasss(cls, NO);
         }
     }
-    
-    CFTimeInterval end = CACurrentMediaTime();
-    
-    NSLog(@"############### costs:%@  ###############",[NSString stringWithFormat:@"%@ - %@ms",NSStringFromClass([self class]), @(1000 * (end - begin))]);
 }
+
+
+#pragma mark - Print Results
+
+void printLoadCostsInfo() {
+    NSLog(@">> all load cost info below :");
+    NSLog(@"\n");
+    for (NSString *costInfo in g_loadcosts) {
+        NSLog(@"%@",costInfo);
+    }
+    NSLog(@"\n");
+}
+
 @end
